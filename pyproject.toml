@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "prompt-eval"
+version = "0.1.0"
+description = "Interactive prompt evaluation agent"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents>=0.4.11",
+    "langchain>=1.2.12",
+    "langchain-core>=1.2.19",
+    "langchain-anthropic>=1.3.5",
+    "langchain-openai>=0.3.0",
+    "langgraph>=1.1.2",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "rich>=14.0.0",
+    "jsonschema>=4.0.0",
+    "genson>=1.3.0",
+    "python-dotenv>=1.0.0",
+    "prompt_toolkit>=3.0.0",
+]
+
+[project.scripts]
+prompt-eval = "prompt_eval.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prompt_eval"]
+
+[tool.uv.sources]
+deepagents = { path = "../deepagents/libs/deepagents", editable = true }
