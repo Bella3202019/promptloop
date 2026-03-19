@@ -9,7 +9,7 @@ import termios
 import tty
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
@@ -18,6 +18,10 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from rich.console import Console
 
 from .agent import create_eval_agent
+
+if TYPE_CHECKING:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 
 
 def _load_env(project_dir: Path) -> None:
@@ -81,7 +85,7 @@ def _list_thread_ids(project_dir: Path) -> list[str]:
         return []
 
 
-def _create_prompt_session() -> Any:
+def _create_prompt_session() -> "PromptSession[str]":
     """Create a PromptSession with Enter=send, Ctrl+J=newline.
     Handles bracketed paste so multi-line paste works (like deepagents/Claude Code).
     """
@@ -91,15 +95,15 @@ def _create_prompt_session() -> Any:
     kb = KeyBindings()
 
     @kb.add("enter")
-    def _enter(event: object) -> None:
+    def _enter(event: "KeyPressEvent") -> None:
         event.current_buffer.validate_and_handle()
 
     @kb.add("c-j")
-    def _newline(event: object) -> None:
+    def _newline(event: "KeyPressEvent") -> None:
         event.current_buffer.insert_text("\n")
 
     @kb.add("c-c")
-    def _ctrl_c(event: Any) -> None:
+    def _ctrl_c(event: "KeyPressEvent") -> None:
         # Ask prompt_toolkit to end the current prompt with KeyboardInterrupt
         # so callers can handle it without an asyncio traceback.
         event.app.exit(exception=KeyboardInterrupt())
@@ -107,7 +111,7 @@ def _create_prompt_session() -> Any:
     return PromptSession(key_bindings=kb, multiline=True)
 
 
-async def _read_user_input(session: object, prompt: Any) -> str:
+async def _read_user_input(session: "PromptSession[str]", prompt: Any) -> str:
     """Read user input via prompt_toolkit. Enter sends, Ctrl+J adds newline."""
     return await session.prompt_async(prompt)
 
@@ -154,6 +158,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
 
     interrupted = False
     stop_escape_listener = asyncio.Event()
+    escape_task: asyncio.Task[bool] | None = None
 
     async def _consume_stream() -> None:
         async for event in agent.astream_events(
@@ -205,7 +210,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
         interrupted = True
     finally:
         stop_escape_listener.set()
-        if "escape_task" in locals() and not escape_task.done():
+        if escape_task is not None and not escape_task.done():
             escape_task.cancel()
             with suppress(asyncio.CancelledError):
                 await escape_task

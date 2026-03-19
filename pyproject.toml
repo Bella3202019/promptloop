@@ -30,3 +30,8 @@ packages = ["src/prompt_eval"]
 
 [tool.uv.sources]
 deepagents = { path = "../deepagents/libs/deepagents", editable = true }
+
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv"
+extraPaths = ["../deepagents/libs/deepagents"]
