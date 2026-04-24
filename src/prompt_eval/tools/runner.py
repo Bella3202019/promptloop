@@ -196,9 +196,11 @@ def make_runner_tools(project_dir: Path):
         if models is None:
             config_file = eval_configs_dir / f"{prompt_id}.json"
             if config_file.exists():
-                models = json.loads(config_file.read_text()).get("default_models", ["anthropic:claude-sonnet-4-6"])
+                resolved_models: list[str] = json.loads(config_file.read_text()).get("default_models", ["anthropic:claude-sonnet-4-6"])
             else:
-                models = ["anthropic:claude-sonnet-4-6"]
+                resolved_models = ["anthropic:claude-sonnet-4-6"]
+        else:
+            resolved_models = models
 
         run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
         run_dir = results_dir / prompt_id / run_id
@@ -207,14 +209,14 @@ def make_runner_tools(project_dir: Path):
         tasks = [
             _run_test_case(tc, prompt_content, model)
             for tc in test_cases
-            for model in models
+            for model in resolved_models
         ]
         results = await asyncio.gather(*tasks)
 
         run_data = {
             "run_id": run_id,
             "prompt_id": prompt_id,
-            "models": models,
+            "models": resolved_models,
             "prompt_version": json.loads((prompt_dir / "meta.json").read_text()).get("version"),
             "started_at": datetime.now().isoformat(),
             "results": [r for r in results],

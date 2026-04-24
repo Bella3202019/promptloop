@@ -36,7 +36,7 @@ console = Console()
 
 WELCOME = """\
 [bold green]prompt-eval[/bold green] — prompt engineering & evaluation agent
-Type your message and press [bold]Enter[/bold] to send. [bold]Ctrl+J[/bold] for newline.
+Type your message and press [bold]Enter[/bold] to send.
 Commands: /help /clear /quit /threads /thread <id>
 """
 
@@ -53,9 +53,9 @@ HELP = """\
   Use [bold]/threads[/bold] to see available thread IDs.
 
 [bold]Input[/bold]
-  [bold]Enter[/bold] to send. [bold]Ctrl+J[/bold] for newline.
+  [bold]Enter[/bold] to send.
   Press [bold]Esc[/bold] while streaming to interrupt the current response.
-  Multi-line paste is supported (paste then Enter to send).
+  Multi-line paste is flattened to a single line before sending.
 
 [bold]Getting started[/bold]
   Tell me a prompt file path: "evaluate the prompt at src/prompts/summarize.txt"
@@ -86,9 +86,7 @@ def _list_thread_ids(project_dir: Path) -> list[str]:
 
 
 def _create_prompt_session() -> "PromptSession[str]":
-    """Create a PromptSession with Enter=send, Ctrl+J=newline.
-    Handles bracketed paste so multi-line paste works (like deepagents/Claude Code).
-    """
+    """Create a PromptSession with Enter=send and single-line paste behavior."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.key_binding import KeyBindings
 
@@ -98,9 +96,18 @@ def _create_prompt_session() -> "PromptSession[str]":
     def _enter(event: "KeyPressEvent") -> None:
         event.current_buffer.validate_and_handle()
 
-    @kb.add("c-j")
-    def _newline(event: "KeyPressEvent") -> None:
-        event.current_buffer.insert_text("\n")
+    @kb.add("bracketed-paste")
+    def _bracketed_paste(event: "KeyPressEvent") -> None:
+        """Flatten pasted multi-paragraph input into one line before insert."""
+        pasted_text = event.data if isinstance(event.data, str) else ""
+        flattened = _normalize_user_input(pasted_text)
+        if not flattened:
+            return
+
+        buffer = event.current_buffer
+        if buffer.document.text_before_cursor and not buffer.document.text_before_cursor.endswith(" "):
+            flattened = f" {flattened}"
+        buffer.insert_text(flattened)
 
     @kb.add("c-c")
     def _ctrl_c(event: "KeyPressEvent") -> None:
@@ -112,8 +119,13 @@ def _create_prompt_session() -> "PromptSession[str]":
 
 
 async def _read_user_input(session: "PromptSession[str]", prompt: Any) -> str:
-    """Read user input via prompt_toolkit. Enter sends, Ctrl+J adds newline."""
+    """Read user input via prompt_toolkit. Enter sends the message."""
     return await session.prompt_async(prompt)
+
+
+def _normalize_user_input(raw_input: str) -> str:
+    """Flatten pasted/typed multi-line input into a single line."""
+    return " ".join(raw_input.split())
 
 
 def _hide_cursor() -> None:
@@ -159,6 +171,55 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
     interrupted = False
     stop_escape_listener = asyncio.Event()
     escape_task: asyncio.Task[bool] | None = None
+    waiting_animation_task: asyncio.Task[None] | None = None
+    waiting_animation_done = asyncio.Event()
+    waiting_animation_stopped = False
+
+    async def _animate_waiting() -> None:
+        # Calm breathing cadence: inhale -> hold -> exhale -> hold.
+        phases: list[tuple[str, float]] = [
+            ("breathing [.    ] inhale", 0.20),
+            ("breathing [..   ] inhale", 0.20),
+            ("breathing [...  ] inhale", 0.20),
+            ("breathing [.... ] inhale", 0.20),
+            ("breathing [.....] inhale", 0.20),
+            ("breathing [.....] hold  ", 0.45),
+            ("breathing [.... ] exhale", 0.20),
+            ("breathing [...  ] exhale", 0.20),
+            ("breathing [..   ] exhale", 0.20),
+            ("breathing [.    ] exhale", 0.20),
+            ("breathing [     ] hold  ", 0.35),
+        ]
+        frame_len = max(len(phase[0]) for phase in phases)
+        phase_idx = 0
+        first_frame = True
+        while not waiting_animation_done.is_set():
+            frame, delay = phases[phase_idx]
+            padded_frame = frame.ljust(frame_len)
+            if first_frame:
+                first_frame = False
+                sys.stdout.write(padded_frame)
+            else:
+                sys.stdout.write("\b" * frame_len + padded_frame)
+            sys.stdout.flush()
+            phase_idx = (phase_idx + 1) % len(phases)
+            await asyncio.sleep(delay)
+
+        # Erase the waiting indicator so streamed content starts cleanly.
+        if first_frame:
+            # Nothing was rendered; avoid writing backspaces.
+            return
+        sys.stdout.write("\b" * frame_len + (" " * frame_len) + ("\b" * frame_len))
+        sys.stdout.flush()
+
+    async def _stop_waiting_animation() -> None:
+        nonlocal waiting_animation_stopped
+        if waiting_animation_stopped:
+            return
+        waiting_animation_stopped = True
+        waiting_animation_done.set()
+        if waiting_animation_task is not None and not waiting_animation_task.done():
+            await waiting_animation_task
 
     async def _consume_stream() -> None:
         async for event in agent.astream_events(
@@ -173,6 +234,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                 if chunk:
                     content = chunk.content
                     if isinstance(content, str) and content:
+                        await _stop_waiting_animation()
                         sys.stdout.write(content)
                         sys.stdout.flush()
                     elif isinstance(content, list):
@@ -180,10 +242,12 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                             if isinstance(block, dict) and block.get("type") == "text":
                                 text = block.get("text", "")
                                 if text:
+                                    await _stop_waiting_animation()
                                     sys.stdout.write(text)
                                     sys.stdout.flush()
 
             elif kind == "on_tool_start":
+                await _stop_waiting_animation()
                 name = event.get("name", "tool")
                 console.print(f"\n[dim]  → {name}[/dim]", end="")
 
@@ -191,6 +255,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                 console.print(" [dim]✓[/dim]", end="")
 
     try:
+        waiting_animation_task = asyncio.create_task(_animate_waiting())
         stream_task = asyncio.create_task(_consume_stream())
         escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener))
         done, _ = await asyncio.wait(
@@ -210,6 +275,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
         interrupted = True
     finally:
         stop_escape_listener.set()
+        await _stop_waiting_animation()
         if escape_task is not None and not escape_task.done():
             escape_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -270,7 +336,9 @@ async def amain() -> None:
         while True:
             try:
                 prompt_str = HTML(prompt_template).format(thread=thread_id[:8])
-                user_input = await _read_user_input(session, prompt_str)
+                user_input = _normalize_user_input(
+                    await _read_user_input(session, prompt_str)
+                )
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]bye[/dim]")
                 break
