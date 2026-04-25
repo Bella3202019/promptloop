@@ -89,6 +89,7 @@ def _create_prompt_session() -> "PromptSession[str]":
     """Create a PromptSession with Enter=send and single-line paste behavior."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
 
     kb = KeyBindings()
 
@@ -96,7 +97,7 @@ def _create_prompt_session() -> "PromptSession[str]":
     def _enter(event: "KeyPressEvent") -> None:
         event.current_buffer.validate_and_handle()
 
-    @kb.add("bracketed-paste")
+    @kb.add(Keys.BracketedPaste)
     def _bracketed_paste(event: "KeyPressEvent") -> None:
         """Flatten pasted multi-paragraph input into one line before insert."""
         pasted_text = event.data if isinstance(event.data, str) else ""
