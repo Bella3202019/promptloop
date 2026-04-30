@@ -175,6 +175,8 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
     waiting_animation_task: asyncio.Task[None] | None = None
     waiting_animation_done = asyncio.Event()
     waiting_animation_stopped = False
+    active_tool_run_ids: set[str] = set()
+    needs_newline_before_next_streamed_text = False
 
     async def _animate_waiting() -> None:
         # Calm breathing cadence: inhale -> hold -> exhale -> hold.
@@ -223,6 +225,12 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
             await waiting_animation_task
 
     async def _consume_stream() -> None:
+        nonlocal needs_newline_before_next_streamed_text
+
+        def _is_inside_tool(event: dict[str, Any]) -> bool:
+            parent_ids = event.get("parent_ids") or []
+            return any(parent_id in active_tool_run_ids for parent_id in parent_ids)
+
         async for event in agent.astream_events(
             {"messages": [HumanMessage(content=message)]},
             config=config,
@@ -231,11 +239,16 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
             kind = event.get("event")
 
             if kind == "on_chat_model_stream":
+                if _is_inside_tool(event):
+                    continue
                 chunk = event["data"].get("chunk")
                 if chunk:
                     content = chunk.content
                     if isinstance(content, str) and content:
                         await _stop_waiting_animation()
+                        if needs_newline_before_next_streamed_text:
+                            sys.stdout.write("\n")
+                            needs_newline_before_next_streamed_text = False
                         sys.stdout.write(content)
                         sys.stdout.flush()
                     elif isinstance(content, list):
@@ -244,16 +257,26 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                                 text = block.get("text", "")
                                 if text:
                                     await _stop_waiting_animation()
+                                    if needs_newline_before_next_streamed_text:
+                                        sys.stdout.write("\n")
+                                        needs_newline_before_next_streamed_text = False
                                     sys.stdout.write(text)
                                     sys.stdout.flush()
 
             elif kind == "on_tool_start":
+                run_id = event.get("run_id")
+                if isinstance(run_id, str):
+                    active_tool_run_ids.add(run_id)
                 await _stop_waiting_animation()
                 name = event.get("name", "tool")
                 console.print(f"\n[dim]  → {name}[/dim]", end="")
 
             elif kind == "on_tool_end":
+                run_id = event.get("run_id")
+                if isinstance(run_id, str):
+                    active_tool_run_ids.discard(run_id)
                 console.print(" [dim]✓[/dim]", end="")
+                needs_newline_before_next_streamed_text = True
 
     try:
         waiting_animation_task = asyncio.create_task(_animate_waiting())
