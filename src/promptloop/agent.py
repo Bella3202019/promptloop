@@ -44,7 +44,7 @@ def create_eval_agent(
         *make_report_tools(project_dir),
     ]
 
-    model = init_chat_model(model_name, temperature=0)
+    model = init_chat_model(model_name, temperature=0, streaming=True)
 
     backend = FilesystemBackend(
         root_dir=str(project_dir),

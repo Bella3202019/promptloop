@@ -14,30 +14,13 @@ def make_prompt_tools(project_dir: Path):
             return 1
         return max(int(p.stem[1:]) for p in existing) + 1
 
-    @tool(parse_docstring=True)
-    def register_prompt(file_path: str, prompt_id: str | None = None) -> str:
-        """Register a prompt file from the codebase into the eval system.
-
-        Reads the prompt file, copies it into .evals/prompts/, and records
-        the source path for future syncing. Call this first before any eval work.
-
-        Args:
-            file_path: Path to the prompt file (absolute, or relative to project root).
-            prompt_id: Optional short identifier. Defaults to the file stem.
-
-        Returns:
-            Confirmation with the registered prompt ID and a content preview.
-        """
-        p = Path(file_path)
-        if not p.is_absolute():
-            p = project_dir / p
-        if not p.exists():
-            return f"Error: file not found at {p}"
-
-        content = p.read_text()
-        pid = prompt_id or p.stem.replace(" ", "_").lower()
-
-        prompt_dir = prompts_dir / pid
+    def _save_prompt(
+        content: str,
+        prompt_id: str,
+        source_path: str | None,
+        source_type: str,
+    ) -> tuple[int, Path]:
+        prompt_dir = prompts_dir / prompt_id
         prompt_dir.mkdir(parents=True, exist_ok=True)
         history_dir = prompt_dir / "history"
         history_dir.mkdir(exist_ok=True)
@@ -47,15 +30,56 @@ def make_prompt_tools(project_dir: Path):
         (history_dir / f"v{version}.txt").write_text(content)
 
         meta = {
-            "source_path": str(p),
-            "prompt_id": pid,
+            "source_path": source_path,
+            "source_type": source_type,
+            "prompt_id": prompt_id,
             "registered_at": datetime.now().isoformat(),
             "version": version,
         }
         (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        return version, prompt_dir
 
+    def _inline_prompt_id() -> str:
+        return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    @tool(parse_docstring=True)
+    def register_prompt(source: str, prompt_id: str | None = None) -> str:
+        """Register a prompt file or inline prompt text into the eval system.
+
+        If source is an existing path, reads the file and records the path for
+        future syncing. Otherwise, treats source as the literal prompt content.
+        Call this first before any eval work.
+
+        Args:
+            source: Path to a prompt file, or literal inline prompt text.
+            prompt_id: Optional short identifier. Defaults to the file stem for
+                files, or an inline timestamp ID for pasted prompt text.
+
+        Returns:
+            Confirmation with the registered prompt ID and a content preview.
+        """
+        p = Path(source)
+        if not p.is_absolute():
+            p = project_dir / p
+
+        if p.exists() and p.is_file():
+            content = p.read_text()
+            pid = prompt_id or p.stem.replace(" ", "_").lower()
+            source_path = str(p)
+            source_type = "file"
+            source_label = f"Source: {p}"
+        else:
+            content = source
+            if not content.strip():
+                return "Error: inline prompt content is empty."
+            pid = prompt_id or _inline_prompt_id()
+            source_path = None
+            source_type = "inline"
+            source_label = "Source: inline prompt"
+
+        version, _ = _save_prompt(content, pid, source_path, source_type)
         preview = content[:300] + "\n..." if len(content) > 300 else content
-        return f"Registered prompt '{pid}' (v{version})\nSource: {p}\n\n{preview}"
+        return f"Registered prompt '{pid}' (v{version})\n{source_label}\n\n{preview}"
 
     @tool(parse_docstring=True)
     def read_current_prompt(prompt_id: str) -> str:
@@ -72,7 +96,8 @@ def make_prompt_tools(project_dir: Path):
             return f"Error: prompt '{prompt_id}' not registered. Use register_prompt first."
         meta = json.loads((prompt_dir / "meta.json").read_text())
         content = (prompt_dir / "current.txt").read_text()
-        return f"Prompt '{prompt_id}' — v{meta['version']} — source: {meta['source_path']}\n\n{content}"
+        source = meta.get("source_path") or "inline prompt"
+        return f"Prompt '{prompt_id}' — v{meta['version']} — source: {source}\n\n{content}"
 
     @tool(parse_docstring=True)
     def list_prompts() -> str:
@@ -92,7 +117,8 @@ def make_prompt_tools(project_dir: Path):
         lines = ["Registered prompts:"]
         for d in entries:
             meta = json.loads((d / "meta.json").read_text())
-            lines.append(f"  {d.name}  v{meta['version']}  →  {meta['source_path']}")
+            source = meta.get("source_path") or "inline prompt"
+            lines.append(f"  {d.name}  v{meta['version']}  →  {source}")
         return "\n".join(lines)
 
     @tool(parse_docstring=True)
@@ -159,12 +185,19 @@ def make_prompt_tools(project_dir: Path):
         meta["updated_at"] = datetime.now().isoformat()
         (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
-        source_path = Path(meta["source_path"])
-        if source_path.exists():
-            source_path.write_text(new_content)
-            source_note = f"Source file updated at {source_path}."
+        source_path_value = meta.get("source_path")
+        if not source_path_value:
+            source_note = "No source file to update for inline prompt."
         else:
-            source_note = f"Warning: source file {source_path} not found; only .evals copy updated."
+            source_path = Path(source_path_value)
+            if not source_path.is_absolute():
+                source_path = project_dir / source_path
+
+            if source_path.exists():
+                source_path.write_text(new_content)
+                source_note = f"Source file updated at {source_path}."
+            else:
+                source_note = f"Warning: source file {source_path} not found; only .evals copy updated."
 
         return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
 

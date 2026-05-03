@@ -6,6 +6,7 @@ import uuid
 import os
 import select
 import termios
+import time
 import tty
 from contextlib import suppress
 from pathlib import Path
@@ -139,13 +140,101 @@ def _show_cursor() -> None:
     sys.stdout.flush()
 
 
+def _format_tool_args(args: dict) -> str:
+    if not args:
+        return ""
+    parts = []
+    for k, v in list(args.items())[:2]:
+        v_str = str(v)
+        if len(v_str) > 35:
+            v_str = v_str[:32] + "…"
+        parts.append(f"{k}={v_str!r}" if isinstance(v, str) else f"{k}={v_str}")
+    preview = ", ".join(parts)
+    if len(args) > 2:
+        preview += ", …"
+    return f"({preview})"
+
+
+def _format_tool_result(event: dict) -> str:
+    name = event.get("name", "")
+    output = event.get("data", {}).get("output")
+    if not output:
+        return ""
+    out_str = str(output)
+    lines = [l for l in out_str.splitlines() if l.strip()]
+    if any(x in name for x in ("read_file", "read")):
+        return f"{len(lines)} lines" if lines else ""
+    if any(x in name for x in ("glob", "grep", "search", "ls")):
+        return f"{len(lines)} results" if lines else ""
+    if out_str.strip() and len(out_str.strip()) < 60:
+        return out_str.strip()
+    return ""
+
+
 async def _stream_response(agent, message: str, thread_id: str) -> None:
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
     }
-    console.print("\n[bold green]agent[/bold green] ", end="")
+    console.print("\n[bold green]agent[/bold green]", end=" ")
     _hide_cursor()
+
+    # ── In-place status ticker ────────────────────────────────────────────────
+    # Shows "verb… Ns" in place, updating every 300 ms.
+    # Call _status_start(verb) to begin, await _status_stop() before any output.
+    _st_task: asyncio.Task[None] | None = None
+    _st_active = False
+    _st_verb = ""
+    _st_start = 0.0
+    _st_rendered = 0  # visible chars currently on stdout from the ticker
+
+    def _st_erase() -> None:
+        nonlocal _st_rendered
+        if _st_rendered:
+            sys.stdout.write("\b" * _st_rendered + " " * _st_rendered + "\b" * _st_rendered)
+            sys.stdout.flush()
+            _st_rendered = 0
+
+    async def _st_run() -> None:
+        nonlocal _st_rendered
+        while _st_active:
+            elapsed = int(time.monotonic() - _st_start)
+            text = f"{_st_verb}… {elapsed}s" if _st_verb else f"… {elapsed}s"
+            _st_erase()
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            _st_rendered = len(text)
+            await asyncio.sleep(0.3)
+
+    def _status_start(verb: str) -> None:
+        nonlocal _st_task, _st_active, _st_verb, _st_start, _st_rendered
+        _st_active = False
+        if _st_task and not _st_task.done():
+            _st_task.cancel()
+        _st_erase()
+        _st_verb = verb
+        _st_start = time.monotonic()
+        _st_active = True
+        _st_rendered = 0
+        _st_task = asyncio.create_task(_st_run())
+
+    async def _status_stop() -> None:
+        nonlocal _st_active, _st_task
+        _st_active = False
+        _st_erase()
+        if _st_task and not _st_task.done():
+            _st_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await _st_task
+        _st_task = None
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    interrupted = False
+    stop_escape_listener = asyncio.Event()
+    escape_task: asyncio.Task[bool] | None = None
+    active_tool_run_ids: set[str] = set()
+    streaming_text = False
 
     async def _wait_for_escape(stop_event: asyncio.Event) -> bool:
         if not sys.stdin.isatty():
@@ -155,7 +244,6 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
         fd = sys.stdin.fileno()
         original_mode = termios.tcgetattr(fd)
         try:
-            # cbreak mode lets us read Esc immediately without waiting for Enter.
             tty.setcbreak(fd)
             while not stop_event.is_set():
                 readable, _, _ = select.select([fd], [], [], 0.1)
@@ -169,67 +257,14 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
 
-    interrupted = False
-    stop_escape_listener = asyncio.Event()
-    escape_task: asyncio.Task[bool] | None = None
-    waiting_animation_task: asyncio.Task[None] | None = None
-    waiting_animation_done = asyncio.Event()
-    waiting_animation_stopped = False
-    active_tool_run_ids: set[str] = set()
-    needs_newline_before_next_streamed_text = False
-
-    async def _animate_waiting() -> None:
-        # Symbol-only bar: fill, pause at full, drain, pause at empty.
-        phases: list[tuple[str, float]] = [
-            ("[.    ]", 0.20),
-            ("[..   ]", 0.20),
-            ("[...  ]", 0.20),
-            ("[.... ]", 0.20),
-            ("[.....]", 0.20),
-            ("[.....]", 0.45),
-            ("[.... ]", 0.20),
-            ("[...  ]", 0.20),
-            ("[..   ]", 0.20),
-            ("[.    ]", 0.20),
-            ("[     ]", 0.35),
-        ]
-        frame_len = max(len(phase[0]) for phase in phases)
-        phase_idx = 0
-        first_frame = True
-        while not waiting_animation_done.is_set():
-            frame, delay = phases[phase_idx]
-            padded_frame = frame.ljust(frame_len)
-            if first_frame:
-                first_frame = False
-                sys.stdout.write(padded_frame)
-            else:
-                sys.stdout.write("\b" * frame_len + padded_frame)
-            sys.stdout.flush()
-            phase_idx = (phase_idx + 1) % len(phases)
-            await asyncio.sleep(delay)
-
-        # Erase the waiting indicator so streamed content starts cleanly.
-        if first_frame:
-            # Nothing was rendered; avoid writing backspaces.
-            return
-        sys.stdout.write("\b" * frame_len + (" " * frame_len) + ("\b" * frame_len))
-        sys.stdout.flush()
-
-    async def _stop_waiting_animation() -> None:
-        nonlocal waiting_animation_stopped
-        if waiting_animation_stopped:
-            return
-        waiting_animation_stopped = True
-        waiting_animation_done.set()
-        if waiting_animation_task is not None and not waiting_animation_task.done():
-            await waiting_animation_task
-
     async def _consume_stream() -> None:
-        nonlocal needs_newline_before_next_streamed_text
+        nonlocal streaming_text
 
         def _is_inside_tool(event: dict[str, Any]) -> bool:
             parent_ids = event.get("parent_ids") or []
-            return any(parent_id in active_tool_run_ids for parent_id in parent_ids)
+            return any(pid in active_tool_run_ids for pid in parent_ids)
+
+        _status_start("Thinking")
 
         async for event in agent.astream_events(
             {"messages": [HumanMessage(content=message)]},
@@ -242,44 +277,65 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                 if _is_inside_tool(event):
                     continue
                 chunk = event["data"].get("chunk")
-                if chunk:
-                    content = chunk.content
-                    if isinstance(content, str) and content:
-                        await _stop_waiting_animation()
-                        if needs_newline_before_next_streamed_text:
-                            sys.stdout.write("\n")
-                            needs_newline_before_next_streamed_text = False
-                        sys.stdout.write(content)
-                        sys.stdout.flush()
-                    elif isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                text = block.get("text", "")
-                                if text:
-                                    await _stop_waiting_animation()
-                                    if needs_newline_before_next_streamed_text:
-                                        sys.stdout.write("\n")
-                                        needs_newline_before_next_streamed_text = False
-                                    sys.stdout.write(text)
-                                    sys.stdout.flush()
+                if not chunk:
+                    continue
+
+                # When model streams a tool call, show which tool is being called
+                # before on_tool_start fires (which only fires after model finishes).
+                for tc in getattr(chunk, "tool_call_chunks", None) or []:
+                    if isinstance(tc, dict) and tc.get("name"):
+                        _st_verb = f"Calling {tc['name']}"
+                        break
+
+                content = chunk.content
+                text = ""
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = "".join(
+                        b.get("text", "")
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                if text:
+                    if not streaming_text:
+                        await _status_stop()
+                        streaming_text = True
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
 
             elif kind == "on_tool_start":
                 run_id = event.get("run_id")
                 if isinstance(run_id, str):
                     active_tool_run_ids.add(run_id)
-                await _stop_waiting_animation()
+                await _status_stop()
+                streaming_text = False
                 name = event.get("name", "tool")
-                console.print(f"\n[dim]  → {name}[/dim]", end="")
+                args = event.get("data", {}).get("input") or {}
+                args_preview = _format_tool_args(args)
+                sys.stdout.write(f"\n  → {name}{args_preview}")
+                sys.stdout.flush()
+                _status_start("")  # show elapsed on the tool line
 
             elif kind == "on_tool_end":
                 run_id = event.get("run_id")
                 if isinstance(run_id, str):
                     active_tool_run_ids.discard(run_id)
-                console.print(" [dim]✓[/dim]", end="")
-                needs_newline_before_next_streamed_text = True
+                await _status_stop()
+                result_summary = _format_tool_result(event)
+                suffix = f" · {result_summary}" if result_summary else ""
+                sys.stdout.write(f" ✓{suffix}\n")
+                sys.stdout.flush()
+                _status_start("Thinking")  # restart for next model step
+
+            elif kind == "on_chat_model_end":
+                # Model finished its turn but LangGraph may still be routing.
+                # Restart status so the user sees activity instead of silence.
+                if not _is_inside_tool(event) and streaming_text:
+                    streaming_text = False
+                    _status_start("Processing")
 
     try:
-        waiting_animation_task = asyncio.create_task(_animate_waiting())
         stream_task = asyncio.create_task(_consume_stream())
         escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener))
         done, _ = await asyncio.wait(
@@ -293,13 +349,12 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
             with suppress(asyncio.CancelledError):
                 await stream_task
         elif stream_task in done:
-            # Propagate errors from streaming (if any).
             await stream_task
     except KeyboardInterrupt:
         interrupted = True
     finally:
         stop_escape_listener.set()
-        await _stop_waiting_animation()
+        await _status_stop()
         if escape_task is not None and not escape_task.done():
             escape_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -308,7 +363,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
 
     if interrupted:
         console.print("\n[yellow]interrupted[/yellow]", end="")
-    console.print()  # final newline
+    console.print()
 
 
 async def amain() -> None:
