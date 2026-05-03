@@ -35,7 +35,7 @@ def _load_env(project_dir: Path) -> None:
 console = Console()
 
 WELCOME = """\
-[bold green]prompt-eval[/bold green] — prompt engineering & evaluation agent
+[bold green]promptloop[/bold green] — prompt engineering & evaluation agent
 Type your message and press [bold]Enter[/bold] to send.
 Commands: /help /clear /quit /threads /thread <id>
 """
@@ -44,12 +44,12 @@ HELP = """\
 [bold]Commands[/bold]
   /help      — show this message
   /clear     — start a new conversation thread
-  /threads   — list saved chat threads (resume with: prompt-eval --thread <id>)
+  /threads   — list saved chat threads (resume with: promptloop --thread <id>)
   /thread <id> — switch to thread (in-session)
   /quit      — exit
 
 [bold]Resuming a chat[/bold]
-  Run [bold]prompt-eval --thread <thread_id>[/bold] to continue a previous conversation.
+  Run [bold]promptloop --thread <thread_id>[/bold] to continue a previous conversation.
   Use [bold]/threads[/bold] to see available thread IDs.
 
 [bold]Input[/bold]
@@ -179,19 +179,19 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
     needs_newline_before_next_streamed_text = False
 
     async def _animate_waiting() -> None:
-        # Calm breathing cadence: inhale -> hold -> exhale -> hold.
+        # Symbol-only bar: fill, pause at full, drain, pause at empty.
         phases: list[tuple[str, float]] = [
-            ("breathing [.    ] inhale", 0.20),
-            ("breathing [..   ] inhale", 0.20),
-            ("breathing [...  ] inhale", 0.20),
-            ("breathing [.... ] inhale", 0.20),
-            ("breathing [.....] inhale", 0.20),
-            ("breathing [.....] hold  ", 0.45),
-            ("breathing [.... ] exhale", 0.20),
-            ("breathing [...  ] exhale", 0.20),
-            ("breathing [..   ] exhale", 0.20),
-            ("breathing [.    ] exhale", 0.20),
-            ("breathing [     ] hold  ", 0.35),
+            ("[.    ]", 0.20),
+            ("[..   ]", 0.20),
+            ("[...  ]", 0.20),
+            ("[.... ]", 0.20),
+            ("[.....]", 0.20),
+            ("[.....]", 0.45),
+            ("[.... ]", 0.20),
+            ("[...  ]", 0.20),
+            ("[..   ]", 0.20),
+            ("[.    ]", 0.20),
+            ("[     ]", 0.35),
         ]
         frame_len = max(len(phase[0]) for phase in phases)
         phase_idx = 0
@@ -313,7 +313,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
 
 async def amain() -> None:
     parser = argparse.ArgumentParser(
-        prog="prompt-eval",
+        prog="promptloop",
         description="Interactive prompt evaluation agent",
     )
     parser.add_argument(
@@ -395,7 +395,7 @@ async def amain() -> None:
                             marker = " ←" if tid == thread_id else ""
                             console.print(f"  {tid}{marker}")
                         console.print(
-                            "[dim]Resume with: prompt-eval --thread <id>[/dim]"
+                            "[dim]Resume with: promptloop --thread <id>[/dim]"
                         )
                 elif cmd == "/thread" and arg:
                     thread_id = arg
