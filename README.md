@@ -90,10 +90,11 @@ Everything is persisted under `.evals/` in the target project:
 
 Use `provider:model-name`, e.g.:
 
+- `anthropic:claude-opus-4-7` — most capable
 - `anthropic:claude-sonnet-4-6`
-- `anthropic:claude-haiku-4-5-20251001`
-- `openai:gpt-4o`
-- `openai:gpt-4o-mini`
+- `anthropic:claude-haiku-4-5-20251001` — fastest/cheapest
+- `openai:gpt-5.5`
+- `openai:gpt-5.2`
 
 The `--model` flag picks the *orchestrator* model. The models *under test* are configured per-eval.
 
