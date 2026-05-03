@@ -35,5 +35,10 @@ When the user pastes a prompt inline (no path), call `register_prompt()` with th
 
 ## Model ids
 
-Format `provider:model-name`. Examples: `anthropic:claude-sonnet-4-6`, `anthropic:claude-haiku-4-5-20251001`, `openai:gpt-4o`, `openai:gpt-4o-mini`.
+Format `provider:model-name`. Examples:
+- `anthropic:claude-opus-4-7` — most capable
+- `anthropic:claude-sonnet-4-6`
+- `anthropic:claude-haiku-4-5-20251001` — fastest/cheapest
+- `openai:gpt-5.5`
+- `openai:gpt-5.2`
 """
