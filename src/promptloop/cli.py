@@ -56,7 +56,7 @@ HELP = """\
 [bold]Input[/bold]
   [bold]Enter[/bold] to send.
   Press [bold]Esc[/bold] while streaming to interrupt the current response.
-  Multi-line paste is flattened to a single line before sending.
+  Multi-line paste keeps formatting for prompts, JSON examples, and markdown.
 
 [bold]Getting started[/bold]
   Tell me a prompt file path: "evaluate the prompt at src/prompts/summarize.txt"
@@ -86,8 +86,21 @@ def _list_thread_ids(project_dir: Path) -> list[str]:
         return []
 
 
+def _resolve_thread_id(project_dir: Path, requested_id: str) -> tuple[str | None, str | None]:
+    thread_ids = _list_thread_ids(project_dir)
+    if requested_id in thread_ids:
+        return requested_id, None
+
+    matches = [tid for tid in thread_ids if tid.startswith(requested_id)]
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, f"Ambiguous thread prefix '{requested_id}' matches {len(matches)} threads."
+    return None, f"No saved thread found for '{requested_id}'. Use /threads to list saved threads."
+
+
 def _create_prompt_session() -> "PromptSession[str]":
-    """Create a PromptSession with Enter=send and single-line paste behavior."""
+    """Create a PromptSession with Enter=send and formatting-preserving paste."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
@@ -100,16 +113,16 @@ def _create_prompt_session() -> "PromptSession[str]":
 
     @kb.add(Keys.BracketedPaste)
     def _bracketed_paste(event: "KeyPressEvent") -> None:
-        """Flatten pasted multi-paragraph input into one line before insert."""
+        """Preserve pasted multi-paragraph input for prompts and examples."""
         pasted_text = event.data if isinstance(event.data, str) else ""
-        flattened = _normalize_user_input(pasted_text)
-        if not flattened:
+        normalized = _normalize_user_input(pasted_text)
+        if not normalized:
             return
 
         buffer = event.current_buffer
-        if buffer.document.text_before_cursor and not buffer.document.text_before_cursor.endswith(" "):
-            flattened = f" {flattened}"
-        buffer.insert_text(flattened)
+        if buffer.document.text_before_cursor and not buffer.document.text_before_cursor.endswith(("\n", " ")):
+            normalized = f"\n{normalized}"
+        buffer.insert_text(normalized)
 
     @kb.add("c-c")
     def _ctrl_c(event: "KeyPressEvent") -> None:
@@ -126,8 +139,8 @@ async def _read_user_input(session: "PromptSession[str]", prompt: Any) -> str:
 
 
 def _normalize_user_input(raw_input: str) -> str:
-    """Flatten pasted/typed multi-line input into a single line."""
-    return " ".join(raw_input.split())
+    """Normalize terminal line endings without changing user formatting."""
+    return raw_input.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _hide_cursor() -> None:
@@ -415,18 +428,17 @@ async def amain() -> None:
         while True:
             try:
                 prompt_str = HTML(prompt_template).format(thread=thread_id[:8])
-                user_input = _normalize_user_input(
-                    await _read_user_input(session, prompt_str)
-                )
+                user_input = _normalize_user_input(await _read_user_input(session, prompt_str))
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]bye[/dim]")
                 break
 
-            if not user_input.strip():
+            stripped_input = user_input.strip()
+            if not stripped_input:
                 continue
 
-            if user_input.startswith("/"):
-                parts = user_input.strip().split(maxsplit=1)
+            if stripped_input.startswith("/") and "\n" not in stripped_input:
+                parts = stripped_input.split(maxsplit=1)
                 cmd = parts[0].lower()
                 arg = parts[1].strip() if len(parts) > 1 else ""
 
@@ -453,8 +465,12 @@ async def amain() -> None:
                             "[dim]Resume with: promptloop --thread <id>[/dim]"
                         )
                 elif cmd == "/thread" and arg:
-                    thread_id = arg
-                    console.print(f"[dim]switched to thread {thread_id}[/dim]")
+                    resolved_thread_id, error = _resolve_thread_id(project_dir, arg)
+                    if error:
+                        console.print(f"[red]{error}[/red]")
+                    else:
+                        thread_id = resolved_thread_id or arg
+                        console.print(f"[dim]switched to thread {thread_id}[/dim]")
                 elif cmd == "/thread":
                     console.print("[red]Usage: /thread <thread_id>[/red]")
                 else:

@@ -5,10 +5,13 @@ import time
 import re
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Optional
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain.chat_models import init_chat_model
 import jsonschema
+
+DEFAULT_MAX_CONCURRENCY = 4
 
 
 def make_runner_tools(project_dir: Path):
@@ -17,8 +20,18 @@ def make_runner_tools(project_dir: Path):
     eval_configs_dir = project_dir / ".evals" / "eval_configs"
     results_dir = project_dir / ".evals" / "results"
 
-    async def _call_model(model_name: str, system_prompt: str, user_input: str) -> tuple[str, float]:
-        model = init_chat_model(model_name, temperature=0)
+    def _get_model(model_cache: dict[str, Any], model_name: str) -> Any:
+        if model_name not in model_cache:
+            model_cache[model_name] = init_chat_model(model_name, temperature=0)
+        return model_cache[model_name]
+
+    async def _call_model(
+        model_cache: dict[str, Any],
+        model_name: str,
+        system_prompt: str,
+        user_input: str,
+    ) -> tuple[str, float]:
+        model = _get_model(model_cache, model_name)
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_input)]
         start = time.monotonic()
         response = await model.ainvoke(messages)
@@ -35,10 +48,11 @@ def make_runner_tools(project_dir: Path):
         return str(content), latency_ms
 
     async def _run_llm_judge(
+        model_cache: dict[str, Any],
         judge_prompt_template: str,
         actual_output: str,
         user_input: str,
-        expected_output: str | None,
+        expected_output: Optional[str],
         judge_model: str,
     ) -> dict:
         prompt = judge_prompt_template.format(
@@ -46,7 +60,7 @@ def make_runner_tools(project_dir: Path):
             output=actual_output,
             expected=expected_output or "N/A",
         )
-        model = init_chat_model(judge_model, temperature=0)
+        model = _get_model(model_cache, judge_model)
         response = await model.ainvoke([HumanMessage(content=prompt)])
         raw = response.content if isinstance(response.content, str) else str(response.content)
 
@@ -64,7 +78,7 @@ def make_runner_tools(project_dir: Path):
             "detail": raw[:600],
         }
 
-    def _run_sync_metric(metric: dict, actual_output: str, expected_output: str | None) -> dict:
+    def _run_sync_metric(metric: dict, actual_output: str, expected_output: Optional[str]) -> dict:
         t = metric.get("type")
         result: dict = {"type": t, "passed": None, "score": None, "detail": ""}
 
@@ -103,7 +117,12 @@ def make_runner_tools(project_dir: Path):
 
         return result
 
-    async def _run_test_case(tc: dict, prompt_content: str, model_name: str) -> dict:
+    async def _run_test_case(
+        tc: dict,
+        prompt_content: str,
+        model_name: str,
+        model_cache: dict[str, Any],
+    ) -> dict:
         result: dict = {
             "test_id": tc["id"],
             "model": model_name,
@@ -115,7 +134,12 @@ def make_runner_tools(project_dir: Path):
             "error": None,
         }
         try:
-            actual_output, latency_ms = await _call_model(model_name, prompt_content, tc["input"])
+            actual_output, latency_ms = await _call_model(
+                model_cache,
+                model_name,
+                prompt_content,
+                tc["input"],
+            )
             result["actual_output"] = actual_output
             result["latency_ms"] = round(latency_ms, 1)
 
@@ -128,6 +152,7 @@ def make_runner_tools(project_dir: Path):
             for metric in metrics:
                 if metric.get("type") == "llm_judge":
                     async_tasks.append(_run_llm_judge(
+                        model_cache,
                         metric.get("judge_prompt", "Rate the output quality 0-10.\nInput: {input}\nOutput: {output}"),
                         actual_output,
                         tc["input"],
@@ -155,20 +180,22 @@ def make_runner_tools(project_dir: Path):
     @tool(parse_docstring=True)
     async def run_eval(
         prompt_id: str,
-        models: list[str] | None = None,
-        test_case_ids: list[str] | None = None,
+        models: Optional[list[str]] = None,
+        test_case_ids: Optional[list[str]] = None,
+        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     ) -> str:
         """Run evaluation for a prompt against all (or selected) test cases.
 
-        Runs each test case × model combination in parallel. Measures latency,
-        validates JSON schema, computes fuzzy match, and calls LLM-as-judge
-        as configured per test case.
+        Runs each test case × model combination with bounded concurrency.
+        Measures latency, validates JSON schema, computes fuzzy match, and
+        calls LLM-as-judge as configured per test case.
 
         Args:
             prompt_id: The prompt identifier.
             models: Models to test, e.g. ["anthropic:claude-sonnet-4-6", "openai:gpt-4o"].
                     Falls back to eval config defaults, then claude-sonnet-4-6.
             test_case_ids: Run only these test case IDs. Runs all if omitted.
+            max_concurrency: Maximum model/judge calls to run at once.
 
         Returns:
             Run ID and a pass/fail summary. Use generate_report() for the full analysis.
@@ -206,19 +233,53 @@ def make_runner_tools(project_dir: Path):
         run_dir = results_dir / prompt_id / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        prompt_version = json.loads((prompt_dir / "meta.json").read_text()).get("version")
+        started_at = datetime.now().isoformat()
+        try:
+            requested_concurrency = int(max_concurrency or DEFAULT_MAX_CONCURRENCY)
+        except (TypeError, ValueError):
+            requested_concurrency = DEFAULT_MAX_CONCURRENCY
+
+        model_cache: dict[str, Any] = {}
+        concurrency = max(1, min(requested_concurrency, len(test_cases) * len(resolved_models)))
+        semaphore = asyncio.Semaphore(concurrency)
+        results: list[dict] = []
+
+        async def _run_limited(tc: dict, model: str) -> dict:
+            async with semaphore:
+                return await _run_test_case(tc, prompt_content, model, model_cache)
+
         tasks = [
-            _run_test_case(tc, prompt_content, model)
+            asyncio.create_task(_run_limited(tc, model))
             for tc in test_cases
             for model in resolved_models
         ]
-        results = await asyncio.gather(*tasks)
+
+        for completed in asyncio.as_completed(tasks):
+            result = await completed
+            results.append(result)
+            partial_data = {
+                "run_id": run_id,
+                "prompt_id": prompt_id,
+                "models": resolved_models,
+                "prompt_version": prompt_version,
+                "started_at": started_at,
+                "status": "running",
+                "max_concurrency": concurrency,
+                "completed": len(results),
+                "total": len(tasks),
+                "results": results,
+            }
+            (run_dir / "raw.json").write_text(json.dumps(partial_data, indent=2))
 
         run_data = {
             "run_id": run_id,
             "prompt_id": prompt_id,
             "models": resolved_models,
-            "prompt_version": json.loads((prompt_dir / "meta.json").read_text()).get("version"),
-            "started_at": datetime.now().isoformat(),
+            "prompt_version": prompt_version,
+            "started_at": started_at,
+            "status": "complete",
+            "max_concurrency": concurrency,
             "results": [r for r in results],
         }
         (run_dir / "raw.json").write_text(json.dumps(run_data, indent=2))
@@ -236,6 +297,7 @@ def make_runner_tools(project_dir: Path):
             f"Run complete — ID: {run_id}",
             f"Results: {passed} passed / {failed} failed / {len(results)} total",
             f"Avg latency: {avg_lat:.0f}ms",
+            f"Max concurrency: {concurrency}",
             "",
         ]
         for r in results:

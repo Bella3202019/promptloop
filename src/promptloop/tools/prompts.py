@@ -42,6 +42,19 @@ def make_prompt_tools(project_dir: Path):
     def _inline_prompt_id() -> str:
         return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+    def _source_path_if_file(source: str) -> Path | None:
+        if "\n" in source or len(source) > 240:
+            return None
+
+        p = Path(source)
+        if not p.is_absolute():
+            p = project_dir / p
+
+        try:
+            return p if p.exists() and p.is_file() else None
+        except OSError:
+            return None
+
     @tool(parse_docstring=True)
     def register_prompt(source: str, prompt_id: str | None = None) -> str:
         """Register a prompt file or inline prompt text into the eval system.
@@ -58,11 +71,9 @@ def make_prompt_tools(project_dir: Path):
         Returns:
             Confirmation with the registered prompt ID and a content preview.
         """
-        p = Path(source)
-        if not p.is_absolute():
-            p = project_dir / p
+        p = _source_path_if_file(source)
 
-        if p.exists() and p.is_file():
+        if p is not None:
             content = p.read_text()
             pid = prompt_id or p.stem.replace(" ", "_").lower()
             source_path = str(p)
