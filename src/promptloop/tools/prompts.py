@@ -1,8 +1,12 @@
 import json
 import difflib
+import re
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 from langchain_core.tools import tool
+
+SAFE_PROMPT_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def make_prompt_tools(project_dir: Path):
@@ -17,10 +21,10 @@ def make_prompt_tools(project_dir: Path):
     def _save_prompt(
         content: str,
         prompt_id: str,
-        source_path: str | None,
+        source_path: Optional[str],
         source_type: str,
     ) -> tuple[int, Path]:
-        prompt_dir = prompts_dir / prompt_id
+        prompt_dir = _prompt_dir(prompt_id)
         prompt_dir.mkdir(parents=True, exist_ok=True)
         history_dir = prompt_dir / "history"
         history_dir.mkdir(exist_ok=True)
@@ -42,7 +46,14 @@ def make_prompt_tools(project_dir: Path):
     def _inline_prompt_id() -> str:
         return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    def _source_path_if_file(source: str) -> Path | None:
+    def _prompt_dir(prompt_id: str) -> Path:
+        if not SAFE_PROMPT_ID.fullmatch(prompt_id):
+            raise ValueError(
+                "prompt_id may only contain letters, numbers, dots, underscores, and hyphens."
+            )
+        return prompts_dir / prompt_id
+
+    def _source_path_if_file(source: str) -> Optional[Path]:
         if "\n" in source or len(source) > 240:
             return None
 
@@ -55,8 +66,79 @@ def make_prompt_tools(project_dir: Path):
         except OSError:
             return None
 
+    def _diff(current: str, proposed: str, prompt_id: str) -> str:
+        diff_lines = list(difflib.unified_diff(
+            current.splitlines(keepends=True),
+            proposed.splitlines(keepends=True),
+            fromfile=f"{prompt_id} (current)",
+            tofile=f"{prompt_id} (proposed)",
+        ))
+        return "".join(diff_lines)
+
+    def _build_prompt_from_edits(current: str, edits: list[dict]) -> tuple[str, Optional[str]]:
+        if not edits:
+            return current, "Error: no edits provided."
+
+        validated_edits = []
+        for i, edit in enumerate(edits, start=1):
+            old = edit.get("old")
+            new = edit.get("new")
+            if not isinstance(old, str) or not isinstance(new, str):
+                return current, f"Error: edit {i} must include string 'old' and 'new' values."
+            if not old:
+                return current, f"Error: edit {i} has an empty 'old' value."
+
+            count = current.count(old)
+            if count == 0:
+                return current, f"Error: edit {i} did not match the current prompt exactly."
+            if count > 1:
+                return current, f"Error: edit {i} matched {count} places. Make the 'old' text more specific."
+            validated_edits.append((old, new))
+
+        proposed = current
+        for old, new in validated_edits:
+            proposed = proposed.replace(old, new, 1)
+        return proposed, None
+
+    def _apply_content(prompt_id: str, new_content: str) -> str:
+        try:
+            prompt_dir = _prompt_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
+        if not prompt_dir.exists():
+            return f"Error: prompt '{prompt_id}' not found."
+
+        current = (prompt_dir / "current.txt").read_text()
+        if current == new_content:
+            return "No changes detected between current and proposed content."
+
+        meta = json.loads((prompt_dir / "meta.json").read_text())
+        new_version = meta["version"] + 1
+        source_path_value = meta.get("source_path")
+        if not source_path_value:
+            source_note = "No source file to update for inline prompt."
+        else:
+            source_path = Path(source_path_value)
+            if not source_path.is_absolute():
+                source_path = project_dir / source_path
+
+            if not source_path.exists():
+                return f"Error: source file {source_path} not found; changes were not applied."
+            source_path.write_text(new_content)
+            source_note = f"Source file updated at {source_path}."
+
+        history_dir = prompt_dir / "history"
+        (history_dir / f"v{new_version}.txt").write_text(new_content)
+        (prompt_dir / "current.txt").write_text(new_content)
+
+        meta["version"] = new_version
+        meta["updated_at"] = datetime.now().isoformat()
+        (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+        return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
+
     @tool(parse_docstring=True)
-    def register_prompt(source: str, prompt_id: str | None = None) -> str:
+    def register_prompt(source: str, prompt_id: Optional[str] = None) -> str:
         """Register a prompt file or inline prompt text into the eval system.
 
         If source is an existing path, reads the file and records the path for
@@ -88,7 +170,10 @@ def make_prompt_tools(project_dir: Path):
             source_type = "inline"
             source_label = "Source: inline prompt"
 
-        version, _ = _save_prompt(content, pid, source_path, source_type)
+        try:
+            version, _ = _save_prompt(content, pid, source_path, source_type)
+        except ValueError as e:
+            return f"Error: {e}"
         preview = content[:300] + "\n..." if len(content) > 300 else content
         return f"Registered prompt '{pid}' (v{version})\n{source_label}\n\n{preview}"
 
@@ -102,7 +187,10 @@ def make_prompt_tools(project_dir: Path):
         Returns:
             The full prompt content with version and source metadata.
         """
-        prompt_dir = prompts_dir / prompt_id
+        try:
+            prompt_dir = _prompt_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not registered. Use register_prompt first."
         meta = json.loads((prompt_dir / "meta.json").read_text())
@@ -136,8 +224,8 @@ def make_prompt_tools(project_dir: Path):
     def propose_prompt_changes(prompt_id: str, new_content: str) -> str:
         """Propose changes to a prompt and show a unified diff.
 
-        Saves the proposed content temporarily. After showing the diff,
-        ask the user to confirm with 'yes' before calling apply_prompt_changes.
+        After showing the diff, ask the user to confirm with 'yes' before
+        calling apply_prompt_changes with the same new_content.
 
         Args:
             prompt_id: The prompt identifier.
@@ -146,71 +234,114 @@ def make_prompt_tools(project_dir: Path):
         Returns:
             A unified diff of current vs proposed content.
         """
-        prompt_dir = prompts_dir / prompt_id
+        try:
+            prompt_dir = _prompt_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
 
         current = (prompt_dir / "current.txt").read_text()
-        diff_lines = list(difflib.unified_diff(
-            current.splitlines(keepends=True),
-            new_content.splitlines(keepends=True),
-            fromfile=f"{prompt_id} (current)",
-            tofile=f"{prompt_id} (proposed)",
-        ))
+        meta = json.loads((prompt_dir / "meta.json").read_text())
+        diff_str = _diff(current, new_content, prompt_id)
 
-        if not diff_lines:
+        if not diff_str:
             return "No changes detected between current and proposed content."
 
-        (prompt_dir / "proposed.txt").write_text(new_content)
-        diff_str = "".join(diff_lines)
-        return f"Proposed changes to '{prompt_id}':\n\n```diff\n{diff_str}\n```\n\nShall I apply this? (yes / no)"
+        return f"Proposed changes to '{prompt_id}' from v{meta['version']}:\n\n```diff\n{diff_str}\n```\n\nShall I apply this? (yes / no)"
 
     @tool(parse_docstring=True)
-    def apply_prompt_changes(prompt_id: str) -> str:
-        """Apply previously proposed prompt changes after explicit user approval.
+    def propose_prompt_edits(prompt_id: str, edits: list[dict]) -> str:
+        """Propose targeted find/replace edits to a prompt and show a diff.
 
-        Only call this after the user has said 'yes' to the proposed diff.
+        Use this for small or medium prompt updates so the agent does not need
+        to pass the full replacement prompt as a tool argument. Each edit must
+        include an exact old string from the current prompt and its replacement.
+
+        Args:
+            prompt_id: The prompt identifier.
+            edits: List of edit dicts. Each dict needs "old" and "new" string
+                keys. The old string must appear exactly once in the current
+                prompt.
+
+        Returns:
+            A unified diff of current vs proposed content.
+        """
+        try:
+            prompt_dir = _prompt_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
+        if not prompt_dir.exists():
+            return f"Error: prompt '{prompt_id}' not found."
+
+        current = (prompt_dir / "current.txt").read_text()
+        meta = json.loads((prompt_dir / "meta.json").read_text())
+        proposed, error = _build_prompt_from_edits(current, edits)
+        if error:
+            return error
+
+        diff_str = _diff(current, proposed, prompt_id)
+        if not diff_str:
+            return "No changes detected between current and proposed content."
+
+        return f"Proposed changes to '{prompt_id}' from v{meta['version']}:\n\n```diff\n{diff_str}\n```\n\nShall I apply this? (yes / no)"
+
+    @tool(parse_docstring=True)
+    def apply_prompt_changes(prompt_id: str, new_content: str, base_version: int) -> str:
+        """Apply a full prompt replacement after explicit user approval.
+
+        Only call this after the user has said 'yes' to the diff returned by
+        propose_prompt_changes for the same new_content and base_version.
         Writes the new content to the source file and saves a history entry.
 
         Args:
             prompt_id: The prompt identifier.
+            new_content: The full replacement prompt content that was shown in
+                the approved diff.
+            base_version: The prompt version shown by propose_prompt_changes.
 
         Returns:
             Confirmation with the new version number.
         """
-        prompt_dir = prompts_dir / prompt_id
-        proposed_file = prompt_dir / "proposed.txt"
-        if not proposed_file.exists():
-            return "No pending changes found. Use propose_prompt_changes first."
-
-        new_content = proposed_file.read_text()
-        history_dir = prompt_dir / "history"
+        try:
+            prompt_dir = _prompt_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
+        if not prompt_dir.exists():
+            return f"Error: prompt '{prompt_id}' not found."
         meta = json.loads((prompt_dir / "meta.json").read_text())
+        if meta.get("version") != base_version:
+            return "Error: prompt changed since this diff was proposed. Please propose the changes again."
+        return _apply_content(prompt_id, new_content)
 
-        new_version = meta["version"] + 1
-        (history_dir / f"v{new_version}.txt").write_text(new_content)
-        (prompt_dir / "current.txt").write_text(new_content)
-        proposed_file.unlink()
+    @tool(parse_docstring=True)
+    def apply_prompt_edits(prompt_id: str, edits: list[dict]) -> str:
+        """Apply targeted find/replace edits after explicit user approval.
 
-        meta["version"] = new_version
-        meta["updated_at"] = datetime.now().isoformat()
-        (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        Only call this after the user has said 'yes' to the diff returned by
+        propose_prompt_edits for the same edits. The edits are revalidated
+        against the current prompt before writing.
 
-        source_path_value = meta.get("source_path")
-        if not source_path_value:
-            source_note = "No source file to update for inline prompt."
-        else:
-            source_path = Path(source_path_value)
-            if not source_path.is_absolute():
-                source_path = project_dir / source_path
+        Args:
+            prompt_id: The prompt identifier.
+            edits: List of edit dicts. Each dict needs "old" and "new" string
+                keys. The old string must appear exactly once in the current
+                prompt.
 
-            if source_path.exists():
-                source_path.write_text(new_content)
-                source_note = f"Source file updated at {source_path}."
-            else:
-                source_note = f"Warning: source file {source_path} not found; only .evals copy updated."
-
-        return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
+        Returns:
+            Confirmation with the new version number.
+        """
+        try:
+            prompt_dir = _prompt_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
+        if not prompt_dir.exists():
+            return f"Error: prompt '{prompt_id}' not found."
+        current = (prompt_dir / "current.txt").read_text()
+        new_content, error = _build_prompt_from_edits(current, edits)
+        if error:
+            return error
+        return _apply_content(prompt_id, new_content)
 
     @tool(parse_docstring=True)
     def show_prompt_history(prompt_id: str) -> str:
@@ -222,7 +353,10 @@ def make_prompt_tools(project_dir: Path):
         Returns:
             List of versions with size info and current marker.
         """
-        prompt_dir = prompts_dir / prompt_id
+        try:
+            prompt_dir = _prompt_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         history_dir = prompt_dir / "history"
         if not history_dir.exists():
             return f"No history found for '{prompt_id}'."
@@ -241,6 +375,8 @@ def make_prompt_tools(project_dir: Path):
         read_current_prompt,
         list_prompts,
         propose_prompt_changes,
+        propose_prompt_edits,
         apply_prompt_changes,
+        apply_prompt_edits,
         show_prompt_history,
     ]
