@@ -10,7 +10,7 @@ import time
 import tty
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
@@ -86,7 +86,7 @@ def _list_thread_ids(project_dir: Path) -> list[str]:
         return []
 
 
-def _resolve_thread_id(project_dir: Path, requested_id: str) -> tuple[str | None, str | None]:
+def _resolve_thread_id(project_dir: Path, requested_id: str) -> tuple[Optional[str], Optional[str]]:
     thread_ids = _list_thread_ids(project_dir)
     if requested_id in thread_ids:
         return requested_id, None
@@ -195,7 +195,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
     # ── In-place status ticker ────────────────────────────────────────────────
     # Shows "verb… Ns" in place, updating every 300 ms.
     # Call _status_start(verb) to begin, await _status_stop() before any output.
-    _st_task: asyncio.Task[None] | None = None
+    _st_task: Optional[asyncio.Task[None]] = None
     _st_active = False
     _st_verb = ""
     _st_start = 0.0
@@ -212,7 +212,10 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
         nonlocal _st_rendered
         while _st_active:
             elapsed = int(time.monotonic() - _st_start)
-            text = f"{_st_verb}… {elapsed}s" if _st_verb else f"… {elapsed}s"
+            if _st_verb.startswith("Drafting "):
+                text = f"{_st_verb}… {elapsed}s (Esc cancels)"
+            else:
+                text = f"{_st_verb}… {elapsed}s" if _st_verb else f"… {elapsed}s"
             _st_erase()
             sys.stdout.write(text)
             sys.stdout.flush()
@@ -245,9 +248,10 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
 
     interrupted = False
     stop_escape_listener = asyncio.Event()
-    escape_task: asyncio.Task[bool] | None = None
+    escape_task: Optional[asyncio.Task[bool]] = None
     active_tool_run_ids: set[str] = set()
     streaming_text = False
+    pending_tool_name: Optional[str] = None
 
     async def _wait_for_escape(stop_event: asyncio.Event) -> bool:
         if not sys.stdin.isatty():
@@ -271,7 +275,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
             termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
 
     async def _consume_stream() -> None:
-        nonlocal streaming_text
+        nonlocal pending_tool_name, streaming_text
 
         def _is_inside_tool(event: dict[str, Any]) -> bool:
             parent_ids = event.get("parent_ids") or []
@@ -297,7 +301,14 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                 # before on_tool_start fires (which only fires after model finishes).
                 for tc in getattr(chunk, "tool_call_chunks", None) or []:
                     if isinstance(tc, dict) and tc.get("name"):
-                        _st_verb = f"Calling {tc['name']}"
+                        tool_name = tc["name"]
+                        if pending_tool_name != tool_name:
+                            pending_tool_name = tool_name
+                            if streaming_text:
+                                sys.stdout.write("\n")
+                                sys.stdout.flush()
+                                streaming_text = False
+                            _status_start(f"Drafting {tool_name} input")
                         break
 
                 content = chunk.content
@@ -326,7 +337,9 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                 name = event.get("name", "tool")
                 args = event.get("data", {}).get("input") or {}
                 args_preview = _format_tool_args(args)
-                sys.stdout.write(f"\n  → {name}{args_preview}")
+                prefix = "" if pending_tool_name else "\n"
+                pending_tool_name = None
+                sys.stdout.write(f"{prefix}  → {name}{args_preview}")
                 sys.stdout.flush()
                 _status_start("")  # show elapsed on the tool line
 
