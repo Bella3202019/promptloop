@@ -23,7 +23,7 @@ cd promptloop
 uv sync
 ```
 
-Set API keys (in `.env.local`, `.env`, or your shell):
+Set API keys (in `.env.local`, `.env`, or your shell). Environment files are loaded from the target project directory first:
 
 ```
 ANTHROPIC_API_KEY=...
@@ -79,24 +79,14 @@ Everything is persisted under `.evals/` in the target project:
 
 ## Metrics
 
+promptloop can help create an eval methodology for each prompt, including metrics such as:
+
 | Metric | What it measures |
 | --- | --- |
 | `latency` | Response time (always recorded) |
 | `json_schema` | Output validates against an inferred schema |
 | `fuzzy_match` | Text similarity vs expected output (configurable threshold) |
 | `llm_judge` | LLM scores the output 0–10 with a judge prompt you approve |
-
-## Models
-
-Use `provider:model-name`, e.g.:
-
-- `anthropic:claude-opus-4-7` — most capable
-- `anthropic:claude-sonnet-4-6`
-- `anthropic:claude-haiku-4-5-20251001` — fastest/cheapest
-- `openai:gpt-5.5`
-- `openai:gpt-5.2`
-
-The `--model` flag picks the *orchestrator* model. The models *under test* are configured per-eval.
 
 ## Status
 
