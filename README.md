@@ -1,40 +1,128 @@
 # Promptloop
 
-An interactive CLI agent that runs the **full prompt-eval loop** — *create test cases → run evals → generate reports → improve the prompt* — without leaving your terminal.
+An interactive CLI agent for the full prompt-eval loop: create test cases, run evals, generate reports, and approve prompt diffs without leaving your terminal.
 
-Point it at a project, tell it which prompt to evaluate, and it will help you design test cases, pick metrics, run evals across models, and propose prompt edits as diffs you approve.
+Built on LangChain [deepagents](https://github.com/langchain-ai/deepagents).
 
-Built on [deepagents](https://github.com/langchain-ai/deepagents) + LangGraph.
+## The Prompt Eval Loop
 
-## Why
+Agent harnesses are getting better, but prompts still shape what they do. promptloop turns a prompt and eval intent into a repeatable loop:
 
-Prompt iteration is usually a loop of *edit → eyeball outputs → tweak*. promptloop turns that loop into a structured workflow:
+<img src="docs/prompt_flow.png" alt="Prompt eval loop" style="max-width: 640px; width: 100%; height: auto;">
 
-- **Locate prompts in real code**, not isolated playgrounds.
-- **Save eval methodology once** per prompt — no re-deciding metrics each run.
-- **Compare across models and versions** with persisted reports.
-- **Apply prompt edits via diffs** with version history.
+It saves the methodology, test cases, reports, prompt history, and chat checkpoints under `.evals/` in the target project.
 
-## Install
+```text
+.evals/
+  prompts/        # registered prompts + version history
+  test_cases/     # per-prompt test suites
+  eval_configs/   # methodology (metrics, models, judges)
+  results/        # eval runs and reports
+  chat.db         # SQLite checkpoint of conversation threads
+```
+
+Example metrics:
+
+- `latency`: response time
+- `json_schema`: validates structured output
+- `fuzzy_match`: compares text similarity
+- `llm_judge`: scores output with a judge prompt
+
+## Quick Demo
+
+Suppose your project has a prompt at `prompts/summarize.md`:
+
+```text
+Summarize the user's note in three bullets.
+Return JSON.
+```
+
+Start promptloop and describe the behavior you want to test:
+
+```text
+$ uv run promptloop --project-dir ~/work/notes-app
+
+promptloop> Evaluate the prompt at prompts/summarize.md.
+
+Registered prompt 'summarize' (v1)
+Source: /Users/me/work/notes-app/prompts/summarize.md
+
+promptloop> Add a test case where the note includes action items, dates, and unrelated chatter.
+
+Added test case 'tc_action_items' for prompt 'summarize'
+(metrics: json_schema, llm_judge).
+
+promptloop> Run the eval.
+
+Run complete - ID: run_20260529_091214_a3f2
+Results: 2 passed / 1 failed / 3 total
+Avg latency: 1840ms
+Max concurrency: 3
+
+  passed [tc_basic_summary] anthropic:claude-sonnet-4-6
+    json_schema: valid JSON matching schema | llm_judge: 0.86
+  failed [tc_action_items] anthropic:claude-sonnet-4-6
+    json_schema: schema mismatch: 'action_items' is a required property
+  passed [tc_noise] anthropic:claude-sonnet-4-6
+    json_schema: valid JSON matching schema | llm_judge: 0.82
+```
+
+Ask for a fix, and promptloop proposes a diff instead of editing blindly:
+
+```text
+promptloop> Propose a prompt change for the failing action-items case.
+
+Proposed changes to 'summarize' from v1:
+```
+
+```diff
+--- summarize (current)
++++ summarize (proposed)
+@@
+-Summarize the user's note in three bullets.
+-Return JSON.
++Summarize the user's note in three bullets.
++If the note contains follow-up tasks, extract them into an action_items array.
++Each action item should include a task, owner if mentioned, and due_date if mentioned.
++
++Return only valid JSON with this shape:
++{
++  "summary": ["...", "...", "..."],
++  "action_items": [
++    {"task": "...", "owner": "...", "due_date": "..."}
++  ]
++}
+```
+
+It also generates a report you can inspect before approving the change:
+
+```markdown
+# Prompt Eval Report: summarize
+
+**Run:** run_20260529_091214_a3f2
+**Models:** anthropic:claude-sonnet-4-6
+**Pass rate:** 67% (2/3)
+**Avg latency:** 1840ms
+
+## Failure Analysis
+
+The action-items case failed because the prompt only requested "three bullets"
+and "JSON"; it did not define a required JSON shape or explain how to handle
+dates, owners, and follow-up tasks.
+
+## Recommendations
+
+1. Add an explicit `action_items` field to the schema.
+2. Tell the model to preserve due dates and owners when present.
+3. Require JSON-only output so downstream parsing is stable.
+```
+
+## Install and Run
 
 ```bash
 git clone <this repo>
 cd promptloop
 uv sync
-```
-
-Set API keys (in `.env.local`, `.env`, or your shell). Environment files are loaded from the target project directory first:
-
-```
-ANTHROPIC_API_KEY=...
-OPENAI_API_KEY=...
-```
-
-## Usage
-
-Run against any project that contains the prompts you want to evaluate:
-
-```bash
 uv run promptloop --project-dir /path/to/your/project
 ```
 
@@ -45,7 +133,7 @@ You'll get an interactive chat. Try things like:
 - *"Re-run with `openai:gpt-4o-mini` and compare to the last run"*
 - *"Propose a fix for the failing JSON schema cases"*
 
-### Commands
+## Commands
 
 | Command | Description |
 | --- | --- |
@@ -57,7 +145,7 @@ You'll get an interactive chat. Try things like:
 
 Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt a streaming response.
 
-## How it works
+## How It Works
 
 The agent has a small set of typed tools on top of deepagents' filesystem access:
 
@@ -66,28 +154,6 @@ The agent has a small set of typed tools on top of deepagents' filesystem access
 - `run_eval`, `list_eval_runs`
 - `generate_report`, `read_report`, `compare_runs`
 
-Everything is persisted under `.evals/` in the target project:
-
-```
-.evals/
-  prompts/        # registered prompts + version history
-  test_cases/     # per-prompt test suites
-  eval_configs/   # methodology (metrics, models, judges)
-  results/        # eval runs and reports
-  chat.db         # SQLite checkpoint of conversation threads
-```
-
-## Metrics
-
-promptloop can help create an eval methodology for each prompt, including metrics such as:
-
-| Metric | What it measures |
-| --- | --- |
-| `latency` | Response time (always recorded) |
-| `json_schema` | Output validates against an inferred schema |
-| `fuzzy_match` | Text similarity vs expected output (configurable threshold) |
-| `llm_judge` | LLM scores the output 0–10 with a judge prompt you approve |
-
-## Status
+For more detail on the agent runtime behind this project, see [The Harness Behind Deep Agent](docs/The_Harness_Behind_Deep_Agent.md).
 
 Early / experimental. Feedback and issues welcome.

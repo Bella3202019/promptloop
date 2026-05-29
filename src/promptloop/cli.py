@@ -26,11 +26,10 @@ if TYPE_CHECKING:
 
 
 def _load_env(project_dir: Path) -> None:
-    """Load .env files from project dir (tries common names), then home dir."""
-    for name in (".env.local", ".env"):
-        if load_dotenv(project_dir / name, override=False, verbose=False):
-            return
+    """Load env files from broad defaults to project-specific overrides."""
     load_dotenv(Path.home() / ".env", override=False, verbose=False)
+    load_dotenv(project_dir / ".env", override=False, verbose=False)
+    load_dotenv(project_dir / ".env.local", override=True, verbose=False)
 
 
 console = Console()

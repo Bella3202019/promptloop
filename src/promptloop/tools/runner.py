@@ -64,11 +64,12 @@ def make_runner_tools(project_dir: Path):
         response = await model.ainvoke([HumanMessage(content=prompt)])
         raw = response.content if isinstance(response.content, str) else str(response.content)
 
-        # Parse a numeric score out of the response (0-10 or 0.0-1.0)
+        # Parse a numeric score out of the response (0-10 or 0.0-1.0).
         score = None
-        m = re.search(r'\b(10|[0-9])(?:\.\d+)?(?:/10)?\b', raw)
+        m = re.search(r'\b(10|[0-9](?:\.\d+)?)(?:/10)?\b', raw)
         if m:
-            score = float(m.group(0).split("/")[0]) / 10.0
+            raw_score = float(m.group(1))
+            score = raw_score if raw_score <= 1 else raw_score / 10.0
             score = min(max(score, 0.0), 1.0)
 
         return {
@@ -219,15 +220,26 @@ def make_runner_tools(project_dir: Path):
         if not test_cases:
             return "No test cases matched the given IDs."
 
-        # Resolve models
+        # Resolve models and default metrics.
+        default_metrics = [{"type": "latency"}]
         if models is None:
             config_file = eval_configs_dir / f"{prompt_id}.json"
             if config_file.exists():
-                resolved_models: list[str] = json.loads(config_file.read_text()).get("default_models", ["anthropic:claude-sonnet-4-6"])
+                config_data = json.loads(config_file.read_text())
+                resolved_models: list[str] = config_data.get("default_models", ["anthropic:claude-sonnet-4-6"])
+                default_metrics = config_data.get("default_metrics") or default_metrics
             else:
                 resolved_models = ["anthropic:claude-sonnet-4-6"]
         else:
             resolved_models = models
+            config_file = eval_configs_dir / f"{prompt_id}.json"
+            if config_file.exists():
+                config_data = json.loads(config_file.read_text())
+                default_metrics = config_data.get("default_metrics") or default_metrics
+
+        for tc in test_cases:
+            if not tc.get("metrics"):
+                tc["metrics"] = default_metrics
 
         run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
         run_dir = results_dir / prompt_id / run_id

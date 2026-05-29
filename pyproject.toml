@@ -28,10 +28,6 @@ promptloop = "promptloop.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/promptloop"]
 
-[tool.uv.sources]
-deepagents = { path = "../deepagents/libs/deepagents", editable = true }
-
 [tool.basedpyright]
 venvPath = "."
 venv = ".venv"
-extraPaths = ["../deepagents/libs/deepagents"]
