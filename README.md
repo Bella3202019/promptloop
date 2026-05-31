@@ -2,13 +2,11 @@
 
 An interactive CLI agent for the full prompt-eval loop: create test cases, run evals, generate reports, and approve prompt diffs without leaving your terminal.
 
-Built on LangChain [deepagents](https://github.com/langchain-ai/deepagents).
-
 ## The Prompt Eval Loop
 
 Agent harnesses are getting better, but prompts still shape what they do. promptloop turns a prompt and eval intent into a repeatable loop:
 
-<img src="docs/prompt_flow.png" alt="Prompt eval loop" style="max-width: 640px; width: 100%; height: auto;">
+<img src="docs/images/prompt_flow.png" alt="Prompt eval loop" style="max-width: 640px; width: 100%; height: auto;">
 
 It saves the methodology, test cases, reports, prompt history, and chat checkpoints under `.evals/` in the target project.
 
@@ -27,95 +25,6 @@ Example metrics:
 - `json_schema`: validates structured output
 - `fuzzy_match`: compares text similarity
 - `llm_judge`: scores output with a judge prompt
-
-## Quick Demo
-
-Suppose your project has a prompt at `prompts/summarize.md`:
-
-```text
-Summarize the user's note in three bullets.
-Return JSON.
-```
-
-Start promptloop and describe the behavior you want to test:
-
-```text
-$ uv run promptloop --project-dir ~/work/notes-app
-
-promptloop> Evaluate the prompt at prompts/summarize.md.
-
-Registered prompt 'summarize' (v1)
-Source: /Users/me/work/notes-app/prompts/summarize.md
-
-promptloop> Add a test case where the note includes action items, dates, and unrelated chatter.
-
-Added test case 'tc_action_items' for prompt 'summarize'
-(metrics: json_schema, llm_judge).
-
-promptloop> Run the eval.
-
-Run complete - ID: run_20260529_091214_a3f2
-Results: 2 passed / 1 failed / 3 total
-Avg latency: 1840ms
-Max concurrency: 3
-
-  passed [tc_basic_summary] anthropic:claude-sonnet-4-6
-    json_schema: valid JSON matching schema | llm_judge: 0.86
-  failed [tc_action_items] anthropic:claude-sonnet-4-6
-    json_schema: schema mismatch: 'action_items' is a required property
-  passed [tc_noise] anthropic:claude-sonnet-4-6
-    json_schema: valid JSON matching schema | llm_judge: 0.82
-```
-
-Ask for a fix, and promptloop proposes a diff instead of editing blindly:
-
-```text
-promptloop> Propose a prompt change for the failing action-items case.
-
-Proposed changes to 'summarize' from v1:
-```
-
-```diff
---- summarize (current)
-+++ summarize (proposed)
-@@
--Summarize the user's note in three bullets.
--Return JSON.
-+Summarize the user's note in three bullets.
-+If the note contains follow-up tasks, extract them into an action_items array.
-+Each action item should include a task, owner if mentioned, and due_date if mentioned.
-+
-+Return only valid JSON with this shape:
-+{
-+  "summary": ["...", "...", "..."],
-+  "action_items": [
-+    {"task": "...", "owner": "...", "due_date": "..."}
-+  ]
-+}
-```
-
-It also generates a report you can inspect before approving the change:
-
-```markdown
-# Prompt Eval Report: summarize
-
-**Run:** run_20260529_091214_a3f2
-**Models:** anthropic:claude-sonnet-4-6
-**Pass rate:** 67% (2/3)
-**Avg latency:** 1840ms
-
-## Failure Analysis
-
-The action-items case failed because the prompt only requested "three bullets"
-and "JSON"; it did not define a required JSON shape or explain how to handle
-dates, owners, and follow-up tasks.
-
-## Recommendations
-
-1. Add an explicit `action_items` field to the schema.
-2. Tell the model to preserve due dates and owners when present.
-3. Require JSON-only output so downstream parsing is stable.
-```
 
 ## Install and Run
 
@@ -145,6 +54,32 @@ You'll get an interactive chat. Try things like:
 
 Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt a streaming response.
 
+## Quick Demo
+
+**Stage 1: Register a prompt** — point promptloop at a prompt file and it registers it with version tracking:
+
+![register prompt](docs/images/01-register-prompt.gif)
+
+**Stage 2: Add test cases** — the agent proposes test cases based on your prompt and intent; you pick what to keep:
+
+![add test cases](docs/images/02-add-test-cases.gif)
+
+**Stage 3: Run the eval** — see pass/fail results per test case with metrics and latency:
+
+![run eval](docs/images/03-run-eval.gif)
+
+**Stage 4: Propose and update the prompt** — when cases fail, ask for a fix. promptloop reads the report, proposes a diff, and saves the updated prompt as a new version on approval:
+
+![propose and update prompt](docs/images/04-propose-and-update-prompt.gif)
+
+**Stage 5: Next iteration** — re-run the eval on the new prompt version and keep iterating:
+
+![next iteration](docs/images/05-next-iteration.gif)
+
+Every run persists the full loop — versioned prompts, test cases, eval configs, and reports — so nothing is lost between sessions:
+
+![promptloop show result](docs/images/promptloop - show result.gif)
+
 ## How It Works
 
 The agent has a small set of typed tools on top of deepagents' filesystem access:
@@ -156,4 +91,20 @@ The agent has a small set of typed tools on top of deepagents' filesystem access
 
 For more detail on the agent runtime behind this project, see [The Harness Behind Deep Agent](docs/The_Harness_Behind_Deep_Agent.md).
 
+
+
 Early / experimental. Feedback and issues welcome.
+
+## What's Next
+
+This is a starting point. A few directions I'm thinking about:
+
+**1. Interface** — the CLI works, but the prompt loop deserves a less friction interface. Extending toward a richer chat UI or editor integration so the loop feels more natural to run.
+
+**2. Less human in the loop** — the current flow still relies on you to drive each stage. 
+
+> *"It would be extremely cool to be able to write one or two lines of prompt in my harness, and have a light model iterate with me a few times writing/proposing requirements, guidelines and explanations, refining the prompt until it's ready to be sent to the actual LLM."* ---- [HN commenters](https://news.ycombinator.com/item?id=48325073):
+
+Ideally it would be a lightweight thing(could be tool, skill, cli, chat interface or a snippet) that co-authors the prompt with you, proposes requirements, flags gaps, and tightens the spec before it ever hits your production model.
+
+Built on LangChain [deepagents](https://github.com/langchain-ai/deepagents).
