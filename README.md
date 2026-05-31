@@ -6,7 +6,7 @@ An interactive CLI agent for the full prompt-eval loop: create test cases, run e
 
 Agent harnesses are getting better, but prompts still shape what they do. promptloop turns a prompt and eval intent into a repeatable loop:
 
-<img src="docs/images/prompt_flow.png" alt="Prompt eval loop" style="max-width: 640px; width: 100%; height: auto;">
+<img src="https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/prompt_flow.png" alt="Prompt eval loop" style="max-width: 640px; width: 100%; height: auto;">
 
 It saves the methodology, test cases, reports, prompt history, and chat checkpoints under `.evals/` in the target project.
 
@@ -58,27 +58,27 @@ Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt
 
 **Stage 1: Register a prompt** — point promptloop at a prompt file and it registers it with version tracking:
 
-![register prompt](docs/images/01-register-prompt.gif)
+![register prompt](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/01-register-prompt.gif)
 
 **Stage 2: Add test cases** — the agent proposes test cases based on your prompt and intent; you pick what to keep:
 
-![add test cases](docs/images/02-add-test-cases.gif)
+![add test cases](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/02-add-test-cases.gif)
 
 **Stage 3: Run the eval** — see pass/fail results per test case with metrics and latency:
 
-![run eval](docs/images/03-run-eval.gif)
+![run eval](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/03-run-eval.gif)
 
 **Stage 4: Propose and update the prompt** — when cases fail, ask for a fix. promptloop reads the report, proposes a diff, and saves the updated prompt as a new version on approval:
 
-![propose and update prompt](docs/images/04-propose-and-update-prompt.gif)
+![propose and update prompt](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/04-propose-and-update-prompt.gif)
 
 **Stage 5: Next iteration** — re-run the eval on the new prompt version and keep iterating:
 
-![next iteration](docs/images/05-next-iteration.gif)
+![next iteration](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/05-next-iteration.gif)
 
 Every run persists the full loop — versioned prompts, test cases, eval configs, and reports — so nothing is lost between sessions:
 
-![promptloop show result](docs/images/promptloop - show result.gif)
+![promptloop show result](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/promptloop.-.show.result.gif)
 
 ## How It Works
 
