@@ -354,11 +354,8 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                 _status_start("Thinking")  # restart for next model step
 
             elif kind == "on_chat_model_end":
-                # Model finished its turn but LangGraph may still be routing.
-                # Restart status so the user sees activity instead of silence.
                 if not _is_inside_tool(event) and streaming_text:
                     streaming_text = False
-                    _status_start("Processing")
 
     try:
         stream_task = asyncio.create_task(_consume_stream())
