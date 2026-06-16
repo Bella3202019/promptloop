@@ -68,7 +68,7 @@ Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt
 
 ![run eval](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/03-run-eval.gif)
 
-**Stage 4: Propose and update the prompt** — when cases fail, ask for a fix. promptloop reads the report, proposes a diff, and saves the updated prompt as a new version on approval:
+**Stage 4: Review and update the prompt** — when cases fail, ask for a fix. promptloop reads the report, shows a colored diff in the terminal, and waits for a keypress (`y`/`n`) before writing anything:
 
 ![propose and update prompt](https://github.com/Bella3202019/promptloop/releases/download/v0.1-media/04-propose-and-update-prompt.gif)
 
@@ -84,7 +84,7 @@ Every run persists the full loop — versioned prompts, test cases, eval configs
 
 The agent has a small set of typed tools on top of deepagents' filesystem access:
 
-- `register_prompt`, `propose_prompt_changes`, `apply_prompt_changes`, `show_prompt_history`
+- `register_prompt`, `edit_prompt`, `show_prompt_history`
 - `add_test_case`, `infer_json_schema`, `save_eval_config`
 - `run_eval`, `list_eval_runs`
 - `generate_report`, `read_report`, `compare_runs`
