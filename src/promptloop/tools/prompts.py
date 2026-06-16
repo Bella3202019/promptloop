@@ -9,7 +9,25 @@ from langchain_core.tools import tool
 SAFE_PROMPT_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
-def make_prompt_tools(project_dir: Path):
+class ApprovalGate:
+    """Shared approval state between the CLI and tools.
+
+    The CLI sets a decision at on_tool_start (after showing the diff and
+    reading a keypress). The tool reads it synchronously when it runs,
+    which always happens after on_tool_start completes.
+    """
+
+    def __init__(self) -> None:
+        self._decisions: dict[str, bool] = {}
+
+    def resolve(self, key: str, approved: bool) -> None:
+        self._decisions[key] = approved
+
+    def consume(self, key: str) -> bool:
+        return self._decisions.pop(key, True)
+
+
+def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
     prompts_dir = project_dir / ".evals" / "prompts"
 
     def _next_version(history_dir: Path) -> int:
@@ -221,115 +239,19 @@ def make_prompt_tools(project_dir: Path):
         return "\n".join(lines)
 
     @tool(parse_docstring=True)
-    def propose_prompt_changes(prompt_id: str, new_content: str) -> str:
-        """Propose changes to a prompt and show a unified diff.
+    def edit_prompt(prompt_id: str, edits: list[dict]) -> str:
+        """Edit a prompt with targeted find/replace changes.
 
-        After showing the diff, ask the user to confirm with 'yes' before
-        calling apply_prompt_changes with the same new_content.
-
-        Args:
-            prompt_id: The prompt identifier.
-            new_content: The full proposed new prompt content.
-
-        Returns:
-            A unified diff of current vs proposed content.
-        """
-        try:
-            prompt_dir = _prompt_dir(prompt_id)
-        except ValueError as e:
-            return f"Error: {e}"
-        if not prompt_dir.exists():
-            return f"Error: prompt '{prompt_id}' not found."
-
-        current = (prompt_dir / "current.txt").read_text()
-        meta = json.loads((prompt_dir / "meta.json").read_text())
-        diff_str = _diff(current, new_content, prompt_id)
-
-        if not diff_str:
-            return "No changes detected between current and proposed content."
-
-        return f"Proposed changes to '{prompt_id}' from v{meta['version']}:\n\n```diff\n{diff_str}\n```\n\nShall I apply this? (yes / no)"
-
-    @tool(parse_docstring=True)
-    def propose_prompt_edits(prompt_id: str, edits: list[dict]) -> str:
-        """Propose targeted find/replace edits to a prompt and show a diff.
-
-        Use this for small or medium prompt updates so the agent does not need
-        to pass the full replacement prompt as a tool argument. Each edit must
-        include an exact old string from the current prompt and its replacement.
+        The TUI will show a diff and ask for approval before writing. If the
+        user denies, the edit is cancelled and nothing is written.
 
         Args:
             prompt_id: The prompt identifier.
-            edits: List of edit dicts. Each dict needs "old" and "new" string
-                keys. The old string must appear exactly once in the current
-                prompt.
+            edits: List of edit dicts with "old" and "new" string keys. Each
+                "old" string must appear exactly once in the current prompt.
 
         Returns:
-            A unified diff of current vs proposed content.
-        """
-        try:
-            prompt_dir = _prompt_dir(prompt_id)
-        except ValueError as e:
-            return f"Error: {e}"
-        if not prompt_dir.exists():
-            return f"Error: prompt '{prompt_id}' not found."
-
-        current = (prompt_dir / "current.txt").read_text()
-        meta = json.loads((prompt_dir / "meta.json").read_text())
-        proposed, error = _build_prompt_from_edits(current, edits)
-        if error:
-            return error
-
-        diff_str = _diff(current, proposed, prompt_id)
-        if not diff_str:
-            return "No changes detected between current and proposed content."
-
-        return f"Proposed changes to '{prompt_id}' from v{meta['version']}:\n\n```diff\n{diff_str}\n```\n\nShall I apply this? (yes / no)"
-
-    @tool(parse_docstring=True)
-    def apply_prompt_changes(prompt_id: str, new_content: str, base_version: int) -> str:
-        """Apply a full prompt replacement after explicit user approval.
-
-        Only call this after the user has said 'yes' to the diff returned by
-        propose_prompt_changes for the same new_content and base_version.
-        Writes the new content to the source file and saves a history entry.
-
-        Args:
-            prompt_id: The prompt identifier.
-            new_content: The full replacement prompt content that was shown in
-                the approved diff.
-            base_version: The prompt version shown by propose_prompt_changes.
-
-        Returns:
-            Confirmation with the new version number.
-        """
-        try:
-            prompt_dir = _prompt_dir(prompt_id)
-        except ValueError as e:
-            return f"Error: {e}"
-        if not prompt_dir.exists():
-            return f"Error: prompt '{prompt_id}' not found."
-        meta = json.loads((prompt_dir / "meta.json").read_text())
-        if meta.get("version") != base_version:
-            return "Error: prompt changed since this diff was proposed. Please propose the changes again."
-        return _apply_content(prompt_id, new_content)
-
-    @tool(parse_docstring=True)
-    def apply_prompt_edits(prompt_id: str, edits: list[dict]) -> str:
-        """Apply targeted find/replace edits after explicit user approval.
-
-        Only call this after the user has said 'yes' to the diff returned by
-        propose_prompt_edits for the same edits. The edits are revalidated
-        against the current prompt before writing.
-
-        Args:
-            prompt_id: The prompt identifier.
-            edits: List of edit dicts. Each dict needs "old" and "new" string
-                keys. The old string must appear exactly once in the current
-                prompt.
-
-        Returns:
-            Confirmation with the new version number.
+            Confirmation with the new version number, or cancellation message.
         """
         try:
             prompt_dir = _prompt_dir(prompt_id)
@@ -341,6 +263,8 @@ def make_prompt_tools(project_dir: Path):
         new_content, error = _build_prompt_from_edits(current, edits)
         if error:
             return error
+        if not gate.consume(prompt_id):
+            return f"Edit to '{prompt_id}' cancelled by user."
         return _apply_content(prompt_id, new_content)
 
     @tool(parse_docstring=True)
@@ -374,9 +298,6 @@ def make_prompt_tools(project_dir: Path):
         register_prompt,
         read_current_prompt,
         list_prompts,
-        propose_prompt_changes,
-        propose_prompt_edits,
-        apply_prompt_changes,
-        apply_prompt_edits,
+        edit_prompt,
         show_prompt_history,
     ]

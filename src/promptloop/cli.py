@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import sqlite3
 import sys
 import argparse
@@ -19,6 +20,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from rich.console import Console
 
 from .agent import create_eval_agent
+from .tools import ApprovalGate
 
 if TYPE_CHECKING:
     from prompt_toolkit import PromptSession
@@ -183,7 +185,72 @@ def _format_tool_result(event: dict) -> str:
     return ""
 
 
-async def _stream_response(agent, message: str, thread_id: str) -> None:
+def _render_prompt_diff(project_dir: Path, prompt_id: str, edits: list[dict]) -> None:
+    """Print a colored unified diff for apply_prompt_edits args, before the tool writes."""
+    try:
+        current_file = project_dir / ".evals" / "prompts" / prompt_id / "current.txt"
+        if not current_file.exists():
+            return
+        current = current_file.read_text()
+
+        proposed = current
+        for edit in edits:
+            old, new = edit.get("old", ""), edit.get("new", "")
+            if not isinstance(old, str) or not old or current.count(old) != 1:
+                return
+            proposed = proposed.replace(old, new, 1)
+
+        diff_lines = list(difflib.unified_diff(
+            current.splitlines(keepends=True),
+            proposed.splitlines(keepends=True),
+            fromfile=f"{prompt_id} (current)",
+            tofile=f"{prompt_id} (proposed)",
+            n=3,
+        ))
+        if not diff_lines:
+            return
+
+        console.print()
+        for line in diff_lines:
+            line = line.rstrip("\n")
+            if line.startswith("+++") or line.startswith("---"):
+                console.print(f"[dim]{line}[/dim]")
+            elif line.startswith("+"):
+                console.print(f"[green]{line}[/green]")
+            elif line.startswith("-"):
+                console.print(f"[red]{line}[/red]")
+            elif line.startswith("@@"):
+                console.print(f"[cyan]{line}[/cyan]")
+            else:
+                console.print(f"[dim]{line}[/dim]")
+        console.print()
+    except Exception:
+        pass
+
+
+async def _read_approval_key() -> bool:
+    """Read a single y/n keypress. Returns True for yes, False for no/esc."""
+    if not sys.stdin.isatty():
+        return True
+    fd = sys.stdin.fileno()
+    original_mode = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            readable, _, _ = select.select([fd], [], [], 0.05)
+            if not readable:
+                await asyncio.sleep(0)
+                continue
+            key = os.read(fd, 1).decode("utf-8", errors="ignore").lower()
+            if key in ("y", "\r", "\n"):
+                return True
+            if key in ("n", ESCAPE_KEY, "q"):
+                return False
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
+
+
+async def _stream_response(agent, message: str, thread_id: str, project_dir: Path, gate: ApprovalGate) -> None:
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
@@ -274,7 +341,7 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
             termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
 
     async def _consume_stream() -> None:
-        nonlocal pending_tool_name, streaming_text
+        nonlocal pending_tool_name, streaming_text, escape_task, stop_escape_listener
 
         def _is_inside_tool(event: dict[str, Any]) -> bool:
             parent_ids = event.get("parent_ids") or []
@@ -335,6 +402,39 @@ async def _stream_response(agent, message: str, thread_id: str) -> None:
                 streaming_text = False
                 name = event.get("name", "tool")
                 args = event.get("data", {}).get("input") or {}
+
+                if name == "edit_prompt":
+                    prompt_id = args.get("prompt_id", "")
+                    prefix = "" if pending_tool_name else "\n"
+                    pending_tool_name = None
+                    sys.stdout.write(f"{prefix}  → {name}")
+                    sys.stdout.flush()
+
+                    _render_prompt_diff(project_dir, prompt_id, args.get("edits", []))
+
+                    # Pause escape listener so it doesn't race for stdin
+                    stop_escape_listener.set()
+                    if escape_task and not escape_task.done():
+                        escape_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await escape_task
+
+                    sys.stdout.write("  [y] Apply  [n] Cancel  ")
+                    sys.stdout.flush()
+                    approved = await _read_approval_key()
+                    gate.resolve(prompt_id, approved)
+
+                    if approved:
+                        console.print("[green]applying[/green]")
+                    else:
+                        console.print("[dim]cancelled[/dim]")
+
+                    # Restart escape listener
+                    stop_escape_listener = asyncio.Event()
+                    escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener))
+                    _status_start("")
+                    continue
+
                 args_preview = _format_tool_args(args)
                 prefix = "" if pending_tool_name else "\n"
                 pending_tool_name = None
@@ -419,7 +519,8 @@ async def amain() -> None:
     db_path = project_dir / ".evals" / CHAT_DB_NAME
 
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-        agent = create_eval_agent(project_dir, args.model, checkpointer=checkpointer)
+        gate = ApprovalGate()
+        agent = create_eval_agent(project_dir, args.model, checkpointer=checkpointer, gate=gate)
         thread_id = args.thread if args.thread else str(uuid.uuid4())
 
         console.print(WELCOME)
@@ -486,7 +587,7 @@ async def amain() -> None:
                     console.print(f"[red]unknown command: {cmd}[/red]")
                 continue
 
-            await _stream_response(agent, user_input, thread_id)
+            await _stream_response(agent, user_input, thread_id, project_dir, gate)
 
 
 def main() -> None:

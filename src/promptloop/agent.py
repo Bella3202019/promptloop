@@ -12,6 +12,7 @@ from .tools import (
     make_test_case_tools,
     make_runner_tools,
     make_report_tools,
+    ApprovalGate,
 )
 
 
@@ -19,6 +20,7 @@ def create_eval_agent(
     project_dir: Path,
     model_name: str = "anthropic:claude-sonnet-4-6",
     checkpointer: Any | None = None,
+    gate: ApprovalGate | None = None,
 ):
     """Create the prompt eval agent scoped to a project directory.
 
@@ -38,7 +40,7 @@ def create_eval_agent(
         (project_dir / ".evals" / subdir).mkdir(parents=True, exist_ok=True)
 
     tools = [
-        *make_prompt_tools(project_dir),
+        *make_prompt_tools(project_dir, gate or ApprovalGate()),
         *make_test_case_tools(project_dir),
         *make_runner_tools(project_dir),
         *make_report_tools(project_dir),

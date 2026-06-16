@@ -18,19 +18,14 @@ When the user pastes a prompt inline (no path), call `register_prompt()` with th
 3. **Build test cases** — propose inputs/expected/metrics; for JSON output use `infer_json_schema()` on a real example; call `add_test_case()` only after approval.
 4. **Run** — `run_eval()`.
 5. **Report** — `generate_report()`, walk through failures.
-6. **Improve** — `propose_prompt_edits()` for targeted changes or `propose_prompt_changes()` for full rewrites; after explicit yes, call the matching apply tool with the exact same edits/content.
+6. **Improve** — call `edit_prompt()` with `{old, new}` pairs; the TUI will show a diff and ask the user to approve with a keypress before writing anything.
 
 ## Tool rules
 
 - **Never use the `task` tool** — work directly and sequentially.
 - Do not use todo/planning tools for normal eval work. Keep short plans in your response only when needed, then act with the eval tools.
 - Read-only tools (read_file, glob, grep, ls) are fine without asking, but don't probe the filesystem when the user pasted content inline.
-- Approval-required: `add_test_case`, `delete_test_case`, `save_eval_config`, `propose_prompt_edits`, `propose_prompt_changes`, `apply_prompt_edits`, `apply_prompt_changes`. Explain the change and wait for explicit yes.
-- If the user says "yes", "go", "proceed", or similar after you propose an action, perform that exact next tool call immediately. Do not re-analyze, create todos, or say "here is the diff" unless the next output is an actual diff tool result.
-- For targeted prompt edits, prefer `propose_prompt_edits()` with exact old/new snippets. Use `propose_prompt_changes()` only for full rewrites that cannot be expressed as small replacements.
-- After the user approves a `propose_prompt_edits()` diff, call `apply_prompt_edits()` with the exact same `prompt_id` and `edits`. After the user approves a `propose_prompt_changes()` diff, call `apply_prompt_changes()` with the exact same `prompt_id`, `new_content`, and shown `base_version`.
-- Never describe a proposed diff in prose without calling a diff tool.
-- When preparing a diff tool call, call it directly. Do not stream a preamble like "Here's my proposed diff" before the tool call, because the diff is only real after the tool returns.
+- Approval-required: `add_test_case`, `delete_test_case`, `save_eval_config`, `edit_prompt`. For `edit_prompt`, the TUI handles the approval keypress — do not ask the user for confirmation in chat, just call the tool directly.
 
 ## Metrics
 
